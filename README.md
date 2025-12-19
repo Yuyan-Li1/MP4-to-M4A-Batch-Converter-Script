@@ -97,6 +97,3 @@ Starting conversions...
 - `1` - Partial or complete failure (one or more files failed to convert)
 - `130` - Interrupted by user (Ctrl+C)
 
-## License
-
-This project is provided as-is for personal use.
