@@ -71,7 +71,7 @@ def _simulate_dry_run(
         leave=False,
     ) as pbar:
         for _ in range(100):
-            time.sleep(0.005)  # Simulate work
+            time.sleep(0.005)
             pbar.update(1)
     duration = time.time() - start_time
     return True, filename, "", duration
@@ -87,7 +87,6 @@ def _create_progress_bar(filename: str, position: int, total_duration: Optional[
             position=position,
             leave=False,
         )
-    # Fallback to indeterminate progress
     return tqdm(
         desc=f"🔄 {filename[:40]}",
         position=position,
@@ -104,18 +103,15 @@ def _parse_ffmpeg_progress(process, pbar, total_duration: Optional[float]) -> li
     for line in process.stderr:
         line = line.strip()
 
-        # Collect error messages
         if line and not line.startswith("out_time_ms=") and "=" not in line:
             error_output.append(line)
 
-        # Parse time progress
         if total_duration and line.startswith("out_time_ms="):
             try:
                 time_ms = int(line.split("=")[1])
                 current_seconds = time_ms / 1_000_000
                 progress_pct = min(100, int((current_seconds / total_duration) * 100))
 
-                # Update progress bar
                 if progress_pct > last_progress:
                     pbar.update(progress_pct - last_progress)
                     last_progress = progress_pct
@@ -187,7 +183,6 @@ def convert_file(
                 error_msg = "\n".join(error_output) if error_output else "FFmpeg error"
                 return False, filename, f"FFmpeg error: {error_msg}", duration
 
-            # Remove original file
             mp4_path.unlink()
             return True, filename, "", duration
 
@@ -217,7 +212,6 @@ def _get_mp4_files(dry_run: bool) -> list:
         if not dry_run:
             print("⚠️  No MP4 files found in current directory")
             return []
-        # In dry-run mode with no files, create fake ones to demonstrate
         print("⚠️  No MP4 files found - creating simulated files for demonstration\n")
         return [Path(f"sample_video_{i}.mp4") for i in range(1, 6)]
 
