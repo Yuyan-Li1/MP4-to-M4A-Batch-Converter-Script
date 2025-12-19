@@ -2,6 +2,7 @@
 """
 Convert MP4 files to M4A (audio only) in parallel with progress tracking.
 """
+
 import argparse
 import os
 import subprocess
@@ -58,6 +59,102 @@ def get_media_duration(file_path: Path) -> Optional[float]:
     return None
 
 
+def _simulate_dry_run(
+    filename: str, position: int, start_time: float
+) -> Tuple[bool, str, str, float]:
+    """Simulate file conversion in dry-run mode."""
+    with tqdm(
+        total=100,
+        desc=f"🔄 {filename[:40]}",
+        unit="%",
+        position=position,
+        leave=False,
+    ) as pbar:
+        for _ in range(100):
+            time.sleep(0.005)  # Simulate work
+            pbar.update(1)
+    duration = time.time() - start_time
+    return True, filename, "", duration
+
+
+def _create_progress_bar(filename: str, position: int, total_duration: Optional[float]):
+    """Create a progress bar based on whether duration is available."""
+    if total_duration:
+        return tqdm(
+            total=100,
+            desc=f"🔄 {filename[:40]}",
+            unit="%",
+            position=position,
+            leave=False,
+        )
+    # Fallback to indeterminate progress
+    return tqdm(
+        desc=f"🔄 {filename[:40]}",
+        position=position,
+        leave=False,
+        bar_format="{desc}: {elapsed}",
+    )
+
+
+def _parse_ffmpeg_progress(process, pbar, total_duration: Optional[float]) -> list:
+    """Parse ffmpeg progress output and update progress bar."""
+    error_output = []
+    last_progress = 0
+
+    for line in process.stderr:
+        line = line.strip()
+
+        # Collect error messages
+        if line and not line.startswith("out_time_ms=") and "=" not in line:
+            error_output.append(line)
+
+        # Parse time progress
+        if total_duration and line.startswith("out_time_ms="):
+            try:
+                time_ms = int(line.split("=")[1])
+                current_seconds = time_ms / 1_000_000
+                progress_pct = min(100, int((current_seconds / total_duration) * 100))
+
+                # Update progress bar
+                if progress_pct > last_progress:
+                    pbar.update(progress_pct - last_progress)
+                    last_progress = progress_pct
+            except (ValueError, IndexError):
+                pass
+
+    return error_output
+
+
+def _run_ffmpeg_conversion(
+    mp4_path: Path, m4a_path: Path, pbar, total_duration: Optional[float]
+) -> Tuple[int, list]:
+    """Run ffmpeg conversion process."""
+    with subprocess.Popen(
+        [
+            "ffmpeg",
+            "-i",
+            str(mp4_path),
+            "-vn",
+            "-c:a",
+            "aac",
+            "-q:a",
+            "2",
+            "-progress",
+            "pipe:2",
+            "-nostats",
+            "-loglevel",
+            "error",
+            str(m4a_path),
+        ],
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as process:
+        error_output = _parse_ffmpeg_progress(process, pbar, total_duration)
+        process.wait()
+        return process.returncode, error_output
+
+
 def convert_file(
     mp4_path: Path, dry_run: bool = False, position: int = 0
 ) -> Tuple[bool, str, str, float]:
@@ -71,107 +168,27 @@ def convert_file(
     filename = mp4_path.name
 
     try:
-        m4a_path = mp4_path.with_suffix(".m4a")
-
         if dry_run:
-            # Simulate processing with visible progress bar
-            with tqdm(
-                total=100,
-                desc=f"🔄 {filename[:40]}",
-                unit="%",
-                position=position,
-                leave=False,
-            ) as pbar:
-                for _ in range(100):
-                    time.sleep(0.005)  # Simulate work
-                    pbar.update(1)
-            duration = time.time() - start_time
-            return True, filename, "", duration
+            return _simulate_dry_run(filename, position, start_time)
 
-        # Get media duration for real progress tracking
+        m4a_path = mp4_path.with_suffix(".m4a")
         total_duration = get_media_duration(mp4_path)
-
-        # Create progress bar
-        if total_duration:
-            pbar = tqdm(
-                total=100,
-                desc=f"🔄 {filename[:40]}",
-                unit="%",
-                position=position,
-                leave=False,
-            )
-        else:
-            # Fallback to indeterminate progress
-            pbar = tqdm(
-                desc=f"🔄 {filename[:40]}",
-                position=position,
-                leave=False,
-                bar_format="{desc}: {elapsed}",
-            )
+        pbar = _create_progress_bar(filename, position, total_duration)
 
         try:
-            # Run ffmpeg with progress output
-            process = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-i",
-                    str(mp4_path),
-                    "-vn",
-                    "-c:a",
-                    "aac",
-                    "-q:a",
-                    "2",
-                    "-progress",
-                    "pipe:2",
-                    "-nostats",
-                    "-loglevel",
-                    "error",
-                    str(m4a_path),
-                ],
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                text=True,
+            returncode, error_output = _run_ffmpeg_conversion(
+                mp4_path, m4a_path, pbar, total_duration
             )
-
-            error_output = []
-            last_progress = 0
-
-            # Parse progress output in real-time
-            for line in process.stderr:
-                line = line.strip()
-
-                # Collect error messages
-                if line and not line.startswith("out_time_ms=") and "=" not in line:
-                    error_output.append(line)
-
-                # Parse time progress
-                if total_duration and line.startswith("out_time_ms="):
-                    try:
-                        time_ms = int(line.split("=")[1])
-                        current_seconds = time_ms / 1_000_000
-                        progress_pct = min(
-                            100, int((current_seconds / total_duration) * 100)
-                        )
-
-                        # Update progress bar
-                        if progress_pct > last_progress:
-                            pbar.update(progress_pct - last_progress)
-                            last_progress = progress_pct
-                    except (ValueError, IndexError):
-                        pass
-
-            process.wait()
             pbar.close()
 
             duration = time.time() - start_time
 
-            if process.returncode != 0:
+            if returncode != 0:
                 error_msg = "\n".join(error_output) if error_output else "FFmpeg error"
                 return False, filename, f"FFmpeg error: {error_msg}", duration
 
             # Remove original file
             mp4_path.unlink()
-
             return True, filename, "", duration
 
         finally:
@@ -186,58 +203,69 @@ def convert_file(
 def format_time(seconds: float) -> str:
     """Format seconds into a human-readable string."""
     if seconds < 1:
-        return f"{seconds*1000:.0f}ms"
-    elif seconds < 60:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 60:
         return f"{seconds:.1f}s"
-    else:
-        return str(timedelta(seconds=int(seconds)))
+    return str(timedelta(seconds=int(seconds)))
 
 
-def main():
-    """Main conversion process."""
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(
-        description="Convert MP4 files to M4A (audio only) in parallel"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Simulate conversion without actually processing files",
-    )
-    args = parser.parse_args()
-
-    # Find all MP4 files in current directory
+def _get_mp4_files(dry_run: bool) -> list:
+    """Find MP4 files or create simulated ones in dry-run mode."""
     mp4_files = list(Path.cwd().glob("*.mp4"))
 
     if not mp4_files:
-        if not args.dry_run:
+        if not dry_run:
             print("⚠️  No MP4 files found in current directory")
-            return 0
+            return []
         # In dry-run mode with no files, create fake ones to demonstrate
         print("⚠️  No MP4 files found - creating simulated files for demonstration\n")
-        mp4_files = [Path(f"sample_video_{i}.mp4") for i in range(1, 6)]
+        return [Path(f"sample_video_{i}.mp4") for i in range(1, 6)]
 
-    # Get number of workers
-    num_workers = get_cpu_count(len(mp4_files))
+    return mp4_files
 
-    if args.dry_run:
-        print("🧪 DRY RUN MODE - No files will be converted or deleted")
-        print(f"   CPU cores detected: {num_workers}\n")
 
-    print(f"🎬 Found {len(mp4_files)} MP4 file(s) to convert")
-    print(f"🚀 Using {num_workers} parallel workers\n")
+def _submit_conversion_tasks(
+    executor, mp4_files: list, num_workers: int, dry_run: bool
+) -> dict:
+    """Submit all conversion tasks to the executor."""
+    futures = {}
+    for idx, mp4_file in enumerate(mp4_files):
+        position = (idx % num_workers) + 1
+        future = executor.submit(convert_file, mp4_file, dry_run, position)
+        futures[future] = mp4_file
+    return futures
 
-    # Track results and timing
+
+def _handle_conversion_result(
+    result_tuple: Tuple[bool, str, str, float],
+    overall_pbar,
+    successful: list,
+    failed: list,
+    file_times: dict,
+):
+    """Handle a single conversion result."""
+    success, filename, error_msg, duration = result_tuple
+    file_times[filename] = duration
+
+    if success:
+        successful.append(filename)
+        overall_pbar.write(f"✅ {filename} ({format_time(duration)})")
+    else:
+        failed.append((filename, error_msg))
+        overall_pbar.write(f"❌ {filename}: {error_msg} ({format_time(duration)})")
+
+
+def _process_conversions(
+    mp4_files: list, num_workers: int, dry_run: bool
+) -> Tuple[list, list, dict]:
+    """Process file conversions in parallel."""
     successful = []
     failed = []
     file_times = {}
-    overall_start = time.time()
-
-    # Process files in parallel with individual progress bars per worker
-    print("Starting conversions...\n")
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Create overall progress bar at top
+        futures = _submit_conversion_tasks(executor, mp4_files, num_workers, dry_run)
+
         with tqdm(
             total=len(mp4_files),
             desc="📊 Overall",
@@ -245,36 +273,25 @@ def main():
             position=0,
             leave=True,
         ) as overall_pbar:
-            # Submit all tasks with position tracking
-            futures = {}
-            for idx, mp4_file in enumerate(mp4_files):
-                # Assign position based on worker slot (cycle through available positions)
-                position = (idx % num_workers) + 1
-                future = executor.submit(convert_file, mp4_file, args.dry_run, position)
-                futures[future] = mp4_file
-
-            # Process completed tasks
             for future in as_completed(futures):
-                mp4_file = futures[future]
-                success, filename, error_msg, duration = future.result()
-
-                file_times[filename] = duration
-
-                if success:
-                    successful.append(filename)
-                    overall_pbar.write(f"✅ {filename} ({format_time(duration)})")
-                else:
-                    failed.append((filename, error_msg))
-                    overall_pbar.write(
-                        f"❌ {filename}: {error_msg} ({format_time(duration)})"
-                    )
-
+                result = future.result()
+                _handle_conversion_result(
+                    result, overall_pbar, successful, failed, file_times
+                )
                 overall_pbar.update(1)
 
-    overall_duration = time.time() - overall_start
+    return successful, failed, file_times
 
-    # Print summary
-    print(f"\n{'='*60}")
+
+def _print_summary(
+    successful: list,
+    failed: list,
+    file_times: dict,
+    overall_duration: float,
+    dry_run: bool,
+):
+    """Print conversion summary statistics."""
+    print(f"\n{'=' * 60}")
     print("📊 Conversion Summary:")
     print(f"   ✅ Successful: {len(successful)}")
     print(f"   ❌ Failed: {len(failed)}")
@@ -288,18 +305,52 @@ def main():
         print(f"   🐇 Fastest: {fastest[1]} ({format_time(fastest[0])})")
         print(f"   🐢 Slowest: {slowest[1]} ({format_time(slowest[0])})")
 
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
-    if args.dry_run:
+    if dry_run:
         print("\n🧪 Dry run complete - no files were modified")
 
     if failed:
         print("\n❌ Failed conversions:")
         for filename, error in failed:
             print(f"   • {filename}: {error}")
-        return 1
 
-    return 0
+
+def main():
+    """Main conversion process."""
+    parser = argparse.ArgumentParser(
+        description="Convert MP4 files to M4A (audio only) in parallel"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Simulate conversion without actually processing files",
+    )
+    args = parser.parse_args()
+
+    mp4_files = _get_mp4_files(args.dry_run)
+    if not mp4_files:
+        return 0
+
+    num_workers = get_cpu_count(len(mp4_files))
+
+    if args.dry_run:
+        print("🧪 DRY RUN MODE - No files will be converted or deleted")
+        print(f"   CPU cores detected: {num_workers}\n")
+
+    print(f"🎬 Found {len(mp4_files)} MP4 file(s) to convert")
+    print(f"🚀 Using {num_workers} parallel workers\n")
+    print("Starting conversions...\n")
+
+    overall_start = time.time()
+    successful, failed, file_times = _process_conversions(
+        mp4_files, num_workers, args.dry_run
+    )
+    overall_duration = time.time() - overall_start
+
+    _print_summary(successful, failed, file_times, overall_duration, args.dry_run)
+
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
